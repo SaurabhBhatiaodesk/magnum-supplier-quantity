@@ -1634,6 +1634,55 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
       
       console.log('Mapped product:', JSON.stringify(product, null, 2));
       
+      // Helper function to extract image URL from various formats
+      const extractImageUrl = (imageData: any): string => {
+        if (!imageData) return '';
+        
+        // If it's already a string URL, return it
+        if (typeof imageData === 'string' && imageData.trim()) {
+          return imageData.trim();
+        }
+        
+        // If it's an array, extract URL from first image object
+        if (Array.isArray(imageData) && imageData.length > 0) {
+          const firstImage = imageData[0];
+          if (firstImage && typeof firstImage === 'object') {
+            // Check for common URL fields
+            return firstImage.url || firstImage.src || firstImage.image_url || firstImage.imageUrl || '';
+          }
+          // If first element is a string, return it
+          if (typeof firstImage === 'string') {
+            return firstImage.trim();
+          }
+        }
+        
+        // If it's an object (but not an array), try to extract URL
+        if (typeof imageData === 'object' && imageData !== null && !Array.isArray(imageData)) {
+          return imageData.url || imageData.src || imageData.image_url || imageData.imageUrl || '';
+        }
+        
+        return '';
+      };
+      
+      // Extract image URL - check mapped fields first, then fallback to original item
+      let imageUrl = '';
+      if (product.image_src) {
+        imageUrl = extractImageUrl(product.image_src);
+        console.log('Extracted image URL from product.image_src:', imageUrl);
+      }
+      if (!imageUrl && product.image_url) {
+        imageUrl = extractImageUrl(product.image_url);
+        console.log('Extracted image URL from product.image_url:', imageUrl);
+      }
+      if (!imageUrl && item.images) {
+        imageUrl = extractImageUrl(item.images);
+        console.log('Extracted image URL from item.images:', imageUrl);
+      }
+      if (!imageUrl) {
+        imageUrl = extractImageUrl(item.image_url || item.image || item.mediaSrc);
+        console.log('Extracted image URL from fallback fields:', imageUrl);
+      }
+      
       // Convert to Shopify format (same as CSV)
       const shopifyProduct: any = {
         title: product.title || item.name || item.title || 'Imported Product',
@@ -1647,7 +1696,7 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
           compareAtPrice: product.compareAtPrice || item.compareAtPrice || '',
           sku: product.sku || item.sku || '',
           barcode: product.barcode || item.barcode || '',
-          image_url: product.image_url || item.image_url || item.image || item.mediaSrc || ''
+          image_url: imageUrl
         }]
       };
       
