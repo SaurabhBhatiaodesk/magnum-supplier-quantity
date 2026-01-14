@@ -1,0 +1,28 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "adf008d1a492305602a8654090ab6754"
+name = "magnum-supplier-quantity"
+application_url = "https://magnum-supplier-quantity-2cf9c7657846.herokuapp.com/"
+embedded = true
+
+[webhooks]
+api_version = "2026-01"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customers,write_customers,write_inventory,read_inventory,read_locations,write_products,write_publications,read_themes,write_themes"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [
+  "https://magnum-supplier-quantity-2cf9c7657846.herokuapp.com//auth/callback",
+  "https://magnum-supplier-quantity-2cf9c7657846.herokuapp.com//auth/shopify/callback",
+  "https://magnum-supplier-quantity-2cf9c7657846.herokuapp.com//api/auth/callback"
+]
+
+[app_preferences]
+url = "https://magnum-supplier-quantity-2cf9c7657846.herokuapp.com/"
+
+[build]
+automatically_update_urls_on_dev = true

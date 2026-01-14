@@ -55,24 +55,29 @@ export const Q_PRODUCT_BY_BARCODE = /* GraphQL */ `
 `;
 
 // utils/graphql.server.ts
-export const M_SET_ON_HAND = /* GraphQL */ `
-mutation inventorySetOnHandQuantities($inventoryItemId: ID!, $locationId: ID!, $quantity: Int!) {
-    inventorySetOnHandQuantities(
-        input: {
-            reason: "correction"
-            setQuantities: {
-                inventoryItemId: $inventoryItemId
-                locationId: $locationId
-                quantity: $quantity
-            }
-        }
-    ) {
-        userErrors {
-            field
-            message
-        }
+export const M_INVENTORY_ACTIVATE = /* GraphQL */ `
+  mutation inventoryActivate($inventoryItemId: ID!, $locationId: ID!) {
+    inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+      inventoryLevel {
+        id
+      }
+      userErrors {
+        field
+        message
+      }
     }
-}
+  }
+`;
+
+export const M_SET_ON_HAND = /* GraphQL */ `
+  mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
+    inventorySetOnHandQuantities(input: $input) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }
 `; 
 
 export const M_VARIANT_POLICY = /* GraphQL */ `

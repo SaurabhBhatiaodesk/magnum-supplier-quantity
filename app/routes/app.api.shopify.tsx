@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { M_SET_ON_HAND, M_INVENTORY_ACTIVATE, Q_SHOP_LOCATIONS } from "../utils/graphql.server";
 
 async function updateShopifyProduct(admin: any, productId: string, productData: any) {
   try {
@@ -141,7 +142,16 @@ async function updateShopifyProduct(admin: any, productId: string, productData: 
       }
     }
 
-    // Step 3: Images update skipped as requested
+    // Step 3: Update inventory quantity if mapped
+    const inventoryQty = productData.variants?.[0]?.inventoryQuantity;
+    if (inventoryQty !== undefined && inventoryQty !== null && inventoryQty !== '') {
+      console.log(`📦 Updating inventory quantity from mapped field: ${inventoryQty}`);
+      await updateInventoryQuantity(admin, product.id, inventoryQty);
+    } else {
+      console.log('⏩ No inventory quantity mapped, skipping inventory update');
+    }
+
+    // Step 4: Images update skipped as requested
     console.log(`🖼️ Images update skipped for existing product`);
 
     return product;
@@ -273,6 +283,187 @@ async function publishProductToSalesChannels(admin: any, productId: string) {
     console.log('✅ Product publishing process completed');
   } catch (error) {
     console.log('❌ Error in publishProductToSalesChannels:', error);
+  }
+}
+
+// Helper function to update inventory quantity for a product variant
+async function updateInventoryQuantity(
+  admin: any,
+  productId: string,
+  inventoryQuantity: number | string | undefined
+) {
+  try {
+    // Skip if inventory quantity is not provided or invalid
+    if (inventoryQuantity === undefined || inventoryQuantity === null || inventoryQuantity === '') {
+      console.log('⏩ Skipping inventory update - no quantity provided');
+      return;
+    }
+
+    // Convert to number
+    const qty = typeof inventoryQuantity === 'string' 
+      ? parseFloat(inventoryQuantity.replace(/[^0-9.\-]/g, '')) 
+      : Number(inventoryQuantity);
+    
+    if (isNaN(qty)) {
+      console.log('⏩ Skipping inventory update - invalid quantity:', inventoryQuantity);
+      return;
+    }
+
+    const quantity = Math.max(0, Math.floor(qty));
+    console.log(`📦 Updating inventory quantity to ${quantity} for product: ${productId}`);
+
+    // Step 1: Get all shop locations
+    const locationsResp = await admin.graphql(Q_SHOP_LOCATIONS, { variables: { first: 250 } });
+    const locationsResult = await locationsResp.json();
+    const locations = locationsResult?.data?.shop?.locations?.edges || [];
+    
+    if (locations.length === 0) {
+      console.log('⚠️ No locations found, skipping inventory update');
+      return;
+    }
+
+    const locationIds = locations.map((edge: any) => edge.node.id);
+    console.log(`📍 Found ${locationIds.length} locations`);
+
+    // Step 2: Get product variants with inventory item IDs
+    const getProductQuery = `#graphql
+      query getProduct($productId: ID!) {
+        product(id: $productId) {
+          id
+          variants(first: 10) {
+            edges {
+              node {
+                id
+                inventoryItem {
+                  id
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const productResp = await admin.graphql(getProductQuery, {
+      variables: { productId }
+    });
+    const productResult = await productResp.json();
+    const variants = productResult?.data?.product?.variants?.edges || [];
+
+    if (variants.length === 0) {
+      console.log('⚠️ No variants found for product, skipping inventory update');
+      return;
+    }
+
+    // Step 3: Activate inventory items at all locations first
+    console.log('🔧 Activating inventory items at locations...');
+    const activatedLocations = new Set<string>(); // Track successfully activated locations
+    
+    for (const variantEdge of variants) {
+      const variant = variantEdge.node;
+      const inventoryItemId = variant.inventoryItem?.id;
+      
+      if (!inventoryItemId) {
+        console.log('⚠️ No inventory item ID for variant:', variant.id);
+        continue;
+      }
+
+      // Activate inventory item at each location
+      for (const locationId of locationIds) {
+        try {
+          const activateResp = await admin.graphql(M_INVENTORY_ACTIVATE, {
+            variables: {
+              inventoryItemId,
+              locationId
+            }
+          });
+          const activateResult = await activateResp.json();
+          
+          if (activateResult?.data?.inventoryActivate?.userErrors?.length > 0) {
+            const errorMsg = activateResult.data.inventoryActivate.userErrors[0]?.message;
+            // Check if it's already activated
+            if (errorMsg.includes('already') || errorMsg.includes('activated') || errorMsg.includes('already active')) {
+              console.log(`✅ Inventory item already activated at location`);
+              activatedLocations.add(locationId);
+            } else {
+              console.log(`⚠️ Activation failed for location ${locationId}: ${errorMsg}`);
+            }
+          } else if (activateResult?.data?.inventoryActivate?.inventoryLevel) {
+            console.log(`✅ Inventory item activated at location`);
+            activatedLocations.add(locationId);
+          }
+        } catch (activateErr: any) {
+          console.error(`❌ Activation error for location ${locationId}:`, activateErr.message);
+        }
+      }
+    }
+    
+    // Only proceed with locations that were successfully activated
+    const validLocationIds = locationIds.filter((locId: string) => activatedLocations.has(locId));
+    if (validLocationIds.length === 0) {
+      console.log('⚠️ No locations were successfully activated, skipping inventory update');
+      return;
+    }
+    console.log(`✅ Successfully activated at ${validLocationIds.length} out of ${locationIds.length} locations`);
+
+    // Step 4: Prepare inventory updates for all variants and activated locations only
+    const inventoryUpdates: { inventoryItemId: string; locationId: string; quantity: number }[] = [];
+    
+    for (const variantEdge of variants) {
+      const variant = variantEdge.node;
+      const inventoryItemId = variant.inventoryItem?.id;
+      
+      if (!inventoryItemId) {
+        console.log('⚠️ No inventory item ID for variant:', variant.id);
+        continue;
+      }
+
+      // Add inventory update only for successfully activated locations
+      for (const locationId of validLocationIds) {
+        inventoryUpdates.push({
+          inventoryItemId,
+          locationId,
+          quantity
+        });
+      }
+    }
+
+    if (inventoryUpdates.length === 0) {
+      console.log('⚠️ No inventory updates to perform');
+      return;
+    }
+
+    // Step 5: Batch update inventory using M_SET_ON_HAND mutation
+    const BATCH_SIZE = 200;
+    for (let i = 0; i < inventoryUpdates.length; i += BATCH_SIZE) {
+      const batch = inventoryUpdates.slice(i, i + BATCH_SIZE);
+      
+      try {
+        const response = await admin.graphql(M_SET_ON_HAND, {
+          variables: {
+            input: {
+              reason: "correction",
+              setQuantities: batch
+            }
+          }
+        });
+
+        const responseData = await response.json();
+
+        if (responseData?.data?.inventorySetOnHandQuantities?.userErrors?.length > 0) {
+          const errorMsg = responseData.data.inventorySetOnHandQuantities.userErrors[0]?.message;
+          console.error("❌ Error setting inventory:", errorMsg);
+        } else {
+          console.log(`✅ Inventory updated successfully for batch ${Math.floor(i / BATCH_SIZE) + 1} (${batch.length} updates)`);
+        }
+      } catch (err: any) {
+        console.error("❌ Error setting inventory batch:", err);
+      }
+    }
+
+    console.log(`✅ Inventory quantity update completed: ${quantity} for ${variants.length} variant(s) across ${validLocationIds.length} location(s)`);
+  } catch (error) {
+    console.error('❌ Error in updateInventoryQuantity:', error);
   }
 }
 
@@ -719,9 +910,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                     };
 
                     const variantInput: any = {
-                      inventoryItem: {
-                        sku: variant.sku || variant.supplier_sku_code || ''
-                      },
                       optionValues: [
                         {
                           optionName: "Title",
@@ -729,6 +917,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                         }
                       ]
                     };
+
+                    // Add SKU if available (check multiple possible fields and mapped values)
+                    const skuValue = variant.sku || 
+                                   variant.supplier_sku_code || 
+                                   processedProduct.sku || 
+                                   variant.code ||
+                                   '';
+                    
+                    if (skuValue && String(skuValue).trim() !== '') {
+                      variantInput.inventoryItem = {
+                        sku: String(skuValue).trim()
+                      };
+                      console.log(`🔧 Variant SKU set: "${String(skuValue).trim()}"`);
+                    } else {
+                      console.log(`⚠️ No SKU found in variant or product, skipping SKU assignment`);
+                      // Still create inventoryItem but without SKU
+                      variantInput.inventoryItem = {};
+                    }
 
                     // Add price
                     variantInput.price = toMoneyString(variant.price);
@@ -765,6 +971,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 }
 
                 console.log('Product and variants created successfully');
+                
+                // Update inventory quantity if mapped
+                const inventoryQty = processedProduct.variants?.[0]?.inventoryQuantity;
+                if (inventoryQty !== undefined && inventoryQty !== null && inventoryQty !== '') {
+                  console.log(`📦 Updating inventory quantity from mapped field: ${inventoryQty}`);
+                  await updateInventoryQuantity(admin, productId, inventoryQty);
+                } else {
+                  console.log('⏩ No inventory quantity mapped, skipping inventory update');
+                }
                 
                 // Publish product to sales channels
                 await publishProductToSalesChannels(admin, productId);
@@ -1430,20 +1645,35 @@ function processCsvData(csvData: any, importFilters: any, keyMappings: any) {
       console.log(`⚠️ No tags field found. Available fields: ${Object.keys(processedRow).join(', ')}`);
     }
     
+    // Apply key mappings to processedRow
+    let mappedRow: any = { ...processedRow };
+    if (keyMappings && typeof keyMappings === 'object') {
+      // Apply mappings: sourceKey -> targetKey
+      for (const [sourceKey, targetKey] of Object.entries(keyMappings)) {
+        if (processedRow[sourceKey] !== undefined) {
+          mappedRow[targetKey as string] = processedRow[sourceKey];
+          console.log(`📋 CSV Mapping: ${sourceKey} -> ${targetKey}: ${processedRow[sourceKey]}`);
+        }
+      }
+    }
+    
     const product = {
-      title: processedRow.Title || processedRow.title || processedRow['Product Title'] || `Product ${index + 1}`,
-      descriptionHtml: processedRow.Description || processedRow.description || '',
-      vendor: processedRow.Vendor || processedRow.vendor || 'Default Vendor',
-      productType: processedRow.Type || processedRow.type || 'Default Type',
+      title: mappedRow.title || processedRow.Title || processedRow.title || processedRow['Product Title'] || `Product ${index + 1}`,
+      descriptionHtml: mappedRow.bodyHtml || mappedRow.descriptionHtml || processedRow.Description || processedRow.description || '',
+      vendor: mappedRow.vendor || processedRow.Vendor || processedRow.vendor || 'Default Vendor',
+      productType: mappedRow.productType || processedRow.Type || processedRow.type || 'Default Type',
       tags: tags,
       status: 'DRAFT',
       variants: [{
-        price: processedRow['Variant Price'] || processedRow.price || processedRow['Buffer Quantity'] || '10.00',
-        compareAtPrice: processedRow['Variant Compare At Price'] || processedRow.compareAtPrice || '',
-        sku: processedRow.SKU || processedRow.sku || `SKU-${index + 1}`,
-        barcode: processedRow['Variant Barcode'] || processedRow.barcode || '',
-        inventoryQuantity: processedRow['Variant Inventory Quantity'] || processedRow.inventoryQuantity || 0,
-        image_url: processedRow['Image URL'] || processedRow.image_url || ''
+        price: mappedRow.price || processedRow['Variant Price'] || processedRow.price || processedRow['Buffer Quantity'] || '10.00',
+        compareAtPrice: mappedRow.compareAtPrice || processedRow['Variant Compare At Price'] || processedRow.compareAtPrice || '',
+        sku: mappedRow.sku || processedRow.SKU || processedRow.sku || `SKU-${index + 1}`,
+        barcode: mappedRow.barcode || processedRow['Variant Barcode'] || processedRow.barcode || '',
+        // Use mapped inventory_quantity if available, otherwise fallback to default fields
+        inventoryQuantity: mappedRow.inventory_quantity !== undefined ? mappedRow.inventory_quantity :
+                          (mappedRow.inventoryQuantity !== undefined ? mappedRow.inventoryQuantity :
+                          (processedRow['Variant Inventory Quantity'] || processedRow.inventoryQuantity || 0)),
+        image_url: mappedRow.image_url || mappedRow.imageUrl || processedRow['Image URL'] || processedRow.image_url || ''
       }]
     };
     
@@ -1624,15 +1854,18 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
       
       // Apply key mappings
       for (const [sourceKey, targetKey] of Object.entries(keyMappings || {})) {
-        console.log(`Mapping ${sourceKey} -> ${targetKey}: ${item[sourceKey as string]}`);
-        if (item[sourceKey as string] !== undefined) {
-          product[targetKey as string] = item[sourceKey as string];
+        const sourceValue = item[sourceKey as string];
+        console.log(`📋 Mapping ${sourceKey} -> ${targetKey}: ${sourceValue} (type: ${typeof sourceValue})`);
+        if (sourceValue !== undefined && sourceValue !== null) {
+          product[targetKey as string] = sourceValue;
+          console.log(`✅ Mapped ${sourceKey}="${sourceValue}" to product.${targetKey}`);
         } else {
-          console.log(`❌ Source key "${sourceKey}" not found in item`);
+          console.log(`❌ Source key "${sourceKey}" not found in item or is null/undefined`);
         }
       }
       
-      console.log('Mapped product:', JSON.stringify(product, null, 2));
+      console.log('📦 Mapped product object:', JSON.stringify(product, null, 2));
+      console.log('📦 Original item object:', JSON.stringify(item, null, 2));
       
       // Helper function to extract image URL from various formats
       const extractImageUrl = (imageData: any): string => {
@@ -1684,6 +1917,16 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
       }
       
       // Convert to Shopify format (same as CSV)
+      // Get SKU from mapped product or original item (check multiple sources)
+      const skuValue = product.sku || 
+                      item.sku || 
+                      item.code || 
+                      item.supplier_code ||
+                      item.supplier_sku_code ||
+                      '';
+      
+      console.log(`🔍 SKU mapping check: product.sku="${product.sku}", item.sku="${item.sku}", item.code="${item.code}", final="${skuValue}"`);
+      
       const shopifyProduct: any = {
         title: product.title || item.name || item.title || 'Imported Product',
         descriptionHtml: product.bodyHtml || product.descriptionHtml || item.description || '',
@@ -1694,9 +1937,14 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
         variants: [{
           price: product.price || item.price || '0.00',
           compareAtPrice: product.compareAtPrice || item.compareAtPrice || '',
-          sku: product.sku || item.sku || '',
+          sku: skuValue,
           barcode: product.barcode || item.barcode || '',
-          image_url: imageUrl
+          image_url: imageUrl,
+          // Include inventory_quantity if mapped (from any source field)
+          inventoryQuantity: product.inventory_quantity !== undefined ? product.inventory_quantity : 
+                            (product.inventoryQuantity !== undefined ? product.inventoryQuantity : 
+                            (item.inventory_quantity !== undefined ? item.inventory_quantity : 
+                            (item.inventoryQuantity !== undefined ? item.inventoryQuantity : undefined)))
         }]
       };
       
