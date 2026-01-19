@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState, useCallback} from "react";
+import {useEffect, useMemo, useState, useCallback, useRef} from "react";
 import {
   Page,
   Layout,
@@ -43,8 +43,8 @@ export default function ImportFilterStep({
   onPrevious,
   onProductCountChange
 }: {
-  filters: { selectedAttributes: string[]; selectedValues: string[] };
-  onFiltersChange: (next: { selectedAttributes: string[]; selectedValues: string[] }) => void;
+  filters: { selectedAttributes: string[]; selectedValues: string[]; apiPagesToFetch?: number[] };
+  onFiltersChange: (next: { selectedAttributes: string[]; selectedValues: string[]; apiPagesToFetch?: number[] }) => void;
   importType: 'all' | 'attribute';
   dataSource: 'api' | 'csv';
   apiCredentials: { apiUrl: string; accessToken: string };
@@ -66,6 +66,21 @@ export default function ImportFilterStep({
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Selected>({});
   const [selectionMode, setSelectionMode] = useState<'attribute' | 'single'>('attribute');
+  // Pagination state for each attribute (UI pagination - showing values)
+  const [attributePages, setAttributePages] = useState<Record<string, number>>({});
+  const ITEMS_PER_PAGE = 20; // Show 20 values per page in UI
+  
+  // API pagination state - track which API page is loaded for each attribute
+  const [apiPages, setApiPages] = useState<Record<string, number>>({});
+  const [apiDataByPage, setApiDataByPage] = useState<Record<string, any[]>>({}); // key: "attribute_key_page", value: items
+  const [apiPaginationInfo, setApiPaginationInfo] = useState<Record<string, any>>({}); // Store pagination info per attribute
+  const [loadingApiPage, setLoadingApiPage] = useState<Record<string, boolean>>({});
+  
+  // Track which API pages have selected values (for optimization)
+  const [selectedApiPages, setSelectedApiPages] = useState<Set<number>>(new Set());
+  
+  // Ref to track previous selected state to prevent infinite loops
+  const prevSelectedRef = useRef<Selected>({});
 
   // Debounced search effect
   useEffect(() => {
@@ -86,7 +101,7 @@ export default function ImportFilterStep({
 
 
 
-  // Fetch API data for attributes
+  // Fetch API data for attributes (initial load - page 1)
   const fetchApiData = async () => {
     if (dataSource !== 'api' || !apiCredentials?.apiUrl || !apiCredentials?.accessToken) return;
     
@@ -96,22 +111,85 @@ export default function ImportFilterStep({
       formData.append('action', 'fetchSampleData');
       formData.append('apiUrl', apiCredentials.apiUrl);
       formData.append('accessToken', apiCredentials.accessToken);
+      formData.append('page', '1'); // Start with page 1
       
       const resp = await fetch('/app/api/external', { method: 'POST', body: formData });
       const data = await resp.json();
       
       if (resp.ok && data?.success && data?.items) {
-        console.log('API data fetched:', data.items.length, 'items');
         setApiData(data.items);
+        // Store pagination info for all attributes (will be set per attribute when computed)
+        if (data.pagination) {
+          const paginationInfo = {
+            ...data.pagination,
+            total: data.pagination.total || 0,
+            perPage: data.pagination.perPage || 100
+          };
+          setApiPaginationInfo(prev => ({ ...prev, 'initial': paginationInfo }));
+          
+          // Also set initial API page for all attributes that will be computed
+          // This will be updated per attribute when they are computed
+        }
       } else {
-        console.error('Failed to fetch API data:', data?.error);
         setApiData([]);
       }
     } catch (error) {
-      console.error('Error fetching API data:', error);
       setApiData([]);
     } finally {
       setIsLoadingApiData(false);
+    }
+  };
+
+  // Fetch specific API page for an attribute
+  const fetchApiPageForAttribute = async (attributeKey: string, page: number) => {
+    if (dataSource !== 'api' || !apiCredentials?.apiUrl || !apiCredentials?.accessToken) return;
+    
+    const cacheKey = `${attributeKey}_${page}`;
+    // Check if already loaded
+    if (apiDataByPage[cacheKey]) {
+      // Still update pagination info if we have it
+      const existingInfo = apiPaginationInfo[attributeKey];
+      if (!existingInfo || existingInfo.currentPage !== page) {
+        // Trigger recomputation by updating apiPages
+        setApiPages(prev => ({ ...prev, [attributeKey]: page }));
+      }
+      return apiDataByPage[cacheKey];
+    }
+    
+    setLoadingApiPage(prev => ({ ...prev, [cacheKey]: true }));
+    try {
+      const formData = new FormData();
+      formData.append('action', 'fetchSampleData');
+      formData.append('apiUrl', apiCredentials.apiUrl);
+      formData.append('accessToken', apiCredentials.accessToken);
+      formData.append('page', page.toString());
+      
+      const resp = await fetch('/app/api/external', { method: 'POST', body: formData });
+      const data = await resp.json();
+      
+      if (resp.ok && data?.success && data?.items) {
+        // Cache the data
+        setApiDataByPage(prev => ({ ...prev, [cacheKey]: data.items }));
+        // Store pagination info for this attribute
+        if (data.pagination) {
+          setApiPaginationInfo(prev => ({ 
+            ...prev, 
+            [attributeKey]: {
+              ...data.pagination,
+              total: data.pagination.total || 0,
+              perPage: data.pagination.perPage || 100
+            }
+          }));
+        }
+        // Update current page
+        setApiPages(prev => ({ ...prev, [attributeKey]: page }));
+        return data.items;
+      }
+      return [];
+    } catch (error) {
+      return [];
+    } finally {
+      setLoadingApiPage(prev => ({ ...prev, [cacheKey]: false }));
     }
   };
 
@@ -132,6 +210,31 @@ export default function ImportFilterStep({
       fetchApiData();
     }
   }, [dataSource, mappings, apiData.length, isLoadingApiData]);
+
+  // Set pagination info for all attributes when initial data loads
+  useEffect(() => {
+    if (dataSource === 'api' && apiPaginationInfo['initial'] && apiData.length > 0) {
+      // Get all unique keys from API data
+      const allKeys = new Set<string>();
+      for (const item of apiData) {
+        if (item && typeof item === 'object') {
+          Object.keys(item).forEach(key => allKeys.add(key));
+        }
+      }
+      
+      // Set pagination info for each attribute if not already set
+      const updates: Record<string, any> = {};
+      for (const key of allKeys) {
+        if (!apiPaginationInfo[key]) {
+          updates[key] = apiPaginationInfo['initial'];
+        }
+      }
+      
+      if (Object.keys(updates).length > 0) {
+        setApiPaginationInfo(prev => ({ ...prev, ...updates }));
+      }
+    }
+  }, [dataSource, apiData, apiPaginationInfo]);
 
   const computedCsvAttributes: Attribute[] = useMemo(() => {
     if (dataSource !== 'csv' || !csvData || !Array.isArray(csvData.headers) || !Array.isArray(csvData.rows)) return [];
@@ -181,22 +284,48 @@ export default function ImportFilterStep({
     return attributes;
   }, [dataSource, csvData]);
 
+  // Get API data for a specific attribute and page
+  const getApiDataForAttribute = useCallback((attributeKey: string, apiPage: number) => {
+    const cacheKey = `${attributeKey}_${apiPage}`;
+    if (apiPage === 1 && apiData.length > 0) {
+      // Use initial loaded data for page 1
+      return apiData;
+    }
+    const cachedData = apiDataByPage[cacheKey];
+    if (cachedData && cachedData.length > 0) {
+      return cachedData;
+    }
+    // If no cached data, return empty array (will trigger fetch if needed)
+    return [];
+  }, [apiData, apiDataByPage]);
+
   const computedApiAttributes: Attribute[] = useMemo(() => {
-    if (dataSource !== 'api' || !Array.isArray(apiData) || apiData.length === 0) return [];
+    if (dataSource !== 'api') return [];
     
-    // Get all unique keys from API data
+    // Get all unique keys from initial API data (page 1)
     const allKeys = new Set<string>();
-    for (const item of apiData) {
-      if (item && typeof item === 'object') {
-        Object.keys(item).forEach(key => allKeys.add(key));
+    if (Array.isArray(apiData) && apiData.length > 0) {
+      for (const item of apiData) {
+        if (item && typeof item === 'object') {
+          Object.keys(item).forEach(key => allKeys.add(key));
+        }
       }
     }
     
     const attributes: Attribute[] = Array.from(allKeys).map((key) => {
+      // Get current API page for this attribute (default to 1)
+      const currentApiPage = apiPages[key] || 1;
+      const dataToUse = getApiDataForAttribute(key, currentApiPage);
+      
+      if (!Array.isArray(dataToUse) || dataToUse.length === 0) {
+        return { key, label: key, values: [] } as Attribute;
+      }
+      
+      // Process data from current API page
       const counts = new Map<string, number>();
       const valueToItems = new Map<string, any[]>(); // Track items for each value
       
-      for (const item of apiData) {
+      for (const item of dataToUse) {
         if (!item || typeof item !== 'object') continue;
         const valueRaw = item[key];
         const value = (valueRaw ?? '').toString().trim();
@@ -237,7 +366,7 @@ export default function ImportFilterStep({
     });
     console.log('Computed API attributes:', attributes.length, 'attributes');
     return attributes;
-  }, [dataSource, apiData]);
+  }, [dataSource, apiData, apiPages, apiDataByPage, getApiDataForAttribute]);
 
   // Create attributes from mappings if no API data yet
   const mappedAttributes: Attribute[] = useMemo(() => {
@@ -387,22 +516,59 @@ export default function ImportFilterStep({
 
   // Persist selection outward so Step 5 can show it
   useEffect(() => {
-    const selectedAttributes = Object.keys(selected);
-    const selectedValues: string[] = [];
-    for (const [key, values] of Object.entries(selected)) {
-      for (const v of values) {
-        selectedValues.push(`${key}::${v}`);
+    // Only call onFiltersChange if selected actually changed
+    const selectedStr = JSON.stringify(selected);
+    const prevSelectedStr = JSON.stringify(prevSelectedRef.current);
+    
+    if (selectedStr !== prevSelectedStr) {
+      prevSelectedRef.current = selected;
+      const selectedAttributes = Object.keys(selected);
+      const selectedValues: string[] = [];
+      
+      // Collect unique API pages that have selected values (for optimization)
+      const apiPagesToFetch = new Set<number>(selectedApiPages);
+      
+      // Also add current API pages for attributes with selections
+      for (const [key, values] of Object.entries(selected)) {
+        if (values.length > 0 && apiPages[key]) {
+          apiPagesToFetch.add(apiPages[key]);
+        }
       }
+      
+      // Always include page 1 if any selections exist (for initial data)
+      if (selectedAttributes.length > 0) {
+        apiPagesToFetch.add(1);
+      }
+      
+      const pagesArray = Array.from(apiPagesToFetch).sort((a, b) => a - b);
+      console.log('📋 API Pages to fetch:', pagesArray, 'from selectedApiPages:', Array.from(selectedApiPages));
+      
+      onFiltersChange({ 
+        selectedAttributes, 
+        selectedValues,
+        apiPagesToFetch: pagesArray // Sorted array of pages to fetch
+      });
     }
-    onFiltersChange({ selectedAttributes, selectedValues });
-  }, [selected, onFiltersChange]);
+  }, [selected, apiPages, selectedApiPages]); // Added selectedApiPages to dependency
 
   function groupBadge(a: Attribute) {
     return <Badge tone="info">{`${a.values.length} values`}</Badge>;
   }
 
   function toggleOpen(key: string) {
-    setOpenGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+    setOpenGroups((prev) => {
+      const isCurrentlyOpen = prev[key];
+      // If opening, reset to page 1 and fetch API page 1 if needed
+      if (!isCurrentlyOpen) {
+        setAttributePages((pages) => ({ ...pages, [key]: 1 }));
+        setApiPages((pages) => ({ ...pages, [key]: 1 }));
+        // Fetch API page 1 for this attribute if API source
+        if (dataSource === 'api' && apiCredentials?.apiUrl) {
+          fetchApiPageForAttribute(key, 1);
+        }
+      }
+      return { ...prev, [key]: !isCurrentlyOpen };
+    });
   }
 
   function onToggleValue(attr: Attribute, value: Value, checked: boolean) {
@@ -411,8 +577,14 @@ export default function ImportFilterStep({
       const arr = new Set(next[attr.key] ?? []);
       // Use original value for filtering, but display label for UI
       const valueToStore = value.originalValue || value.label;
-      if (checked) arr.add(valueToStore);
-      else arr.delete(valueToStore);
+      if (checked) {
+        arr.add(valueToStore);
+        // Track which API page this selection came from
+        const currentApiPage = apiPages[attr.key] || 1;
+        setSelectedApiPages(prev => new Set([...prev, currentApiPage]));
+      } else {
+        arr.delete(valueToStore);
+      }
       next[attr.key] = Array.from(arr);
       if (next[attr.key].length === 0) delete next[attr.key];
       if (checked) setOpenGroups((og) => ({ ...og, [attr.key]: true }));
@@ -430,6 +602,9 @@ export default function ImportFilterStep({
         // Select all values for this attribute
         next[attr.key] = attr.values.map(v => v.originalValue || v.label);
         setOpenGroups((og) => ({ ...og, [attr.key]: true }));
+        // Track which API page this selection came from
+        const currentApiPage = apiPages[attr.key] || 1;
+        setSelectedApiPages(prev => new Set([...prev, currentApiPage]));
       } else {
         // Deselect all values for this attribute
         delete next[attr.key];
@@ -675,11 +850,63 @@ export default function ImportFilterStep({
                           />
                           {groupBadge(attr)}
                         </InlineStack>
-                        <Button
-                          variant="tertiary"
-                          icon={openGroups[attr.key] ? ChevronUpIcon : ChevronDownIcon}
-                          onClick={() => toggleOpen(attr.key)}
-                        />
+                        <InlineStack gap="200" blockAlign="center">
+                          {/* API Pagination Controls - Show in header */}
+                          {dataSource === 'api' && (apiPaginationInfo[attr.key] || apiPaginationInfo['initial']) && (() => {
+                            const paginationInfo = apiPaginationInfo[attr.key] || apiPaginationInfo['initial'] || {};
+                            const total = paginationInfo.total || 0;
+                            const totalApiPages = Math.ceil(total / 100);
+                            const currentApiPage = apiPages[attr.key] || 1;
+                            const isLoading = loadingApiPage[`${attr.key}_${currentApiPage}`] || false;
+                            
+                            return (
+                              <ButtonGroup>
+                                <Button
+                                  size="slim"
+                                  icon={ArrowLeftIcon}
+                                  onClick={async () => {
+                                    if (currentApiPage > 1 && !isLoading) {
+                                      const newPage = currentApiPage - 1;
+                                      await fetchApiPageForAttribute(attr.key, newPage);
+                                      // fetchApiPageForAttribute already updates apiPages, but ensure it's set
+                                      setApiPages(prev => ({ ...prev, [attr.key]: newPage }));
+                                    }
+                                  }}
+                                  disabled={currentApiPage === 1 || isLoading}
+                                  loading={isLoading}
+                                  accessibilityLabel="Previous API Page"
+                                />
+                                <Button
+                                  size="slim"
+                                  variant="plain"
+                                  disabled
+                                >
+                                  API {String(currentApiPage)}/{String(totalApiPages)}
+                                </Button>
+                                <Button
+                                  size="slim"
+                                  icon={ArrowRightIcon}
+                                  onClick={async () => {
+                                    if (currentApiPage < totalApiPages && !isLoading) {
+                                      const newPage = currentApiPage + 1;
+                                      await fetchApiPageForAttribute(attr.key, newPage);
+                                      // fetchApiPageForAttribute already updates apiPages, but ensure it's set
+                                      setApiPages(prev => ({ ...prev, [attr.key]: newPage }));
+                                    }
+                                  }}
+                                  disabled={currentApiPage >= totalApiPages || isLoading}
+                                  loading={isLoading}
+                                  accessibilityLabel="Next API Page"
+                                />
+                              </ButtonGroup>
+                            );
+                          })()}
+                          <Button
+                            variant="tertiary"
+                            icon={openGroups[attr.key] ? ChevronUpIcon : ChevronDownIcon}
+                            onClick={() => toggleOpen(attr.key)}
+                          />
+                        </InlineStack>
                       </InlineStack>
 
                       {openGroups[attr.key] && (
@@ -687,18 +914,113 @@ export default function ImportFilterStep({
                           <Text as="p" tone="subdued">SELECT VALUES</Text>
                           <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid #e1e3e5', borderRadius: '8px', padding: '8px' }}>
                             <BlockStack gap="100">
-                              {attr.values.length > 0 ? (
-                                attr.values.map((v) => (
-                                  <InlineStack key={v.label} align="space-between" blockAlign="center">
-                                    <Checkbox
-                                      label={v.label}
-                                      checked={!!selected[attr.key]?.includes(v.originalValue || v.label)}
-                                      onChange={(checked) => onToggleValue(attr, v, checked)}
-                                    />
-                                    <Text as="span" tone="subdued">{v.count} products</Text>
-                                  </InlineStack>
-                                ))
-                              ) : (
+                              {attr.values.length > 0 ? (() => {
+                                const currentPage = attributePages[attr.key] || 1;
+                                const totalPages = Math.ceil(attr.values.length / ITEMS_PER_PAGE);
+                                const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+                                const endIndex = startIndex + ITEMS_PER_PAGE;
+                                const paginatedValues = attr.values.slice(startIndex, endIndex);
+                                
+                                return (
+                                  <>
+                                    {paginatedValues.map((v) => (
+                                      <InlineStack key={v.label} align="space-between" blockAlign="center">
+                                        <Checkbox
+                                          label={v.label}
+                                          checked={!!selected[attr.key]?.includes(v.originalValue || v.label)}
+                                          onChange={(checked) => onToggleValue(attr, v, checked)}
+                                        />
+                                        <Text as="span" tone="subdued">{v.count} products</Text>
+                                      </InlineStack>
+                                    ))}
+                                    
+                                    {/* Pagination Controls - Show if more than ITEMS_PER_PAGE values */}
+                                    {totalPages > 1 && (
+                                      <div style={{ marginTop: 'var(--p-space-200)' }}>
+                                        <Box padding="200" borderColor="border" borderWidth="025" borderRadius="200">
+                                          <InlineStack align="space-between" blockAlign="center"> 
+                                          <Button
+                                            size="slim"
+                                            variant="plain"
+                                            icon={ArrowLeftIcon}
+                                            onClick={async () => {
+                                              const newPage = Math.max(1, currentPage - 1);
+                                              setAttributePages(prev => ({
+                                                ...prev,
+                                                [attr.key]: newPage
+                                              }));
+                                              
+                                              // If API source, calculate which API page we need
+                                              if (dataSource === 'api' && apiCredentials?.apiUrl) {
+                                                // Calculate API page: each API page has 100 items, UI shows 20 per page
+                                                // So API page 1 = UI pages 1-5, API page 2 = UI pages 6-10, etc.
+                                                const neededApiPage = Math.ceil(newPage / (100 / ITEMS_PER_PAGE));
+                                                const currentApiPage = apiPages[attr.key] || 1;
+                                                
+                                                if (neededApiPage !== currentApiPage) {
+                                                  await fetchApiPageForAttribute(attr.key, neededApiPage);
+                                                  setApiPages(prev => ({ ...prev, [attr.key]: neededApiPage }));
+                                                }
+                                              }
+                                            }}
+                                            disabled={currentPage === 1}
+                                          >
+                                            Previous
+                                          </Button>
+                                          
+                                          <Text as="span" tone="subdued" variant="bodySm">
+                                            Page {currentPage} of {totalPages} ({attr.values.length} total values)
+                                            {dataSource === 'api' && apiPaginationInfo[attr.key] && (
+                                              <span> • API Page {apiPages[attr.key] || 1} of {Math.ceil((apiPaginationInfo[attr.key]?.total || 0) / 100)}</span>
+                                            )}
+                                          </Text>
+                                          
+                                          <Button
+                                            size="slim"
+                                            variant="plain"
+                                            icon={ArrowRightIcon}
+                                            onClick={async () => {
+                                              const newPage = Math.min(totalPages, currentPage + 1);
+                                              setAttributePages(prev => ({
+                                                ...prev,
+                                                [attr.key]: newPage
+                                              }));
+                                              
+                                              // If API source, fetch next API page if needed
+                                              if (dataSource === 'api' && apiCredentials?.apiUrl) {
+                                                // Calculate API page: each API page has 100 items, UI shows 20 per page
+                                                const neededApiPage = Math.ceil(newPage / (100 / ITEMS_PER_PAGE));
+                                                const currentApiPage = apiPages[attr.key] || 1;
+                                                
+                                                if (neededApiPage !== currentApiPage) {
+                                                  const paginationInfo = apiPaginationInfo[attr.key] || apiPaginationInfo['initial'];
+                                                  if (paginationInfo?.hasNextPage || neededApiPage <= (paginationInfo?.total || 0) / 100) {
+                                                    await fetchApiPageForAttribute(attr.key, neededApiPage);
+                                                    setApiPages(prev => ({ ...prev, [attr.key]: neededApiPage }));
+                                                  }
+                                                }
+                                              }
+                                            }}
+                                            disabled={currentPage === totalPages}
+                                          >
+                                            Next
+                                          </Button>
+                                        </InlineStack>
+                                        </Box>
+                                      </div>
+                                    )}
+                                    
+                                    {/* Show page info even if only 1 page, for debugging */}
+                                    {totalPages === 1 && attr.values.length > 0 && (
+                                      <Box padding="100">
+                                        <Text as="span" tone="subdued" variant="bodySm">
+                                          Showing all {attr.values.length} values
+                                        </Text>
+                                      </Box>
+                                    )}
+                                  </>
+                                );
+                              })() : (
                                 <Box padding="200">
                                   <Text as="p" tone="subdued" variant="bodySm">NO VALUE FOUND</Text>
                                 </Box>

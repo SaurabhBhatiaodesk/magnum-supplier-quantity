@@ -100,6 +100,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       case "fetchSampleData": {
         const apiUrl = formData.get("apiUrl");
         let accessToken = formData.get("accessToken");
+        const pageParam = formData.get("page");
+        const page = pageParam ? parseInt(pageParam.toString(), 10) : 1;
+        
         if (typeof apiUrl !== "string" || typeof accessToken !== "string") {
           return json(
             { success: false, error: "Missing apiUrl or accessToken" },
@@ -109,7 +112,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const normalizedToken = accessToken.replace(/^Bearer\s+/i, "");
 
         try {
-          const res = await fetch(apiUrl, {
+          // Build URL with page parameter
+          let fetchUrl = apiUrl;
+          if (page > 1) {
+            const urlObj = new URL(apiUrl);
+            urlObj.searchParams.set('page', page.toString());
+            fetchUrl = urlObj.toString();
+          }
+          
+          const res: Response = await fetch(fetchUrl, {
             method: "GET",
             headers: {
               Authorization: `Bearer ${normalizedToken}`,
@@ -123,7 +134,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           if (!contentType.includes("application/json")) {
             return json({ success: false, error: "Non-JSON response from API" }, { status: 400 });
           }
-          const body = await res.json();
+          const body: any = await res.json();
 
           const isArrayOfObjects = (val: any) => Array.isArray(val) && val.length > 0 && typeof val[0] === "object" && !Array.isArray(val[0]);
 
@@ -140,11 +151,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             }
           }
 
+          // Extract pagination info from API response
+          const paginationInfo = {
+            currentPage: page,
+            perPage: body.per_page || 100,
+            total: body.total || (items ? items.length : 0),
+            nextPageUrl: body.next_page_url || null,
+            prevPageUrl: body.prev_page_url || null,
+            hasNextPage: !!body.next_page_url,
+            hasPrevPage: !!body.prev_page_url
+          };
+
           if (!items || items.length === 0) {
-            return json({ success: true, items: [] });
+            return json({ 
+              success: true, 
+              items: [],
+              pagination: paginationInfo
+            });
           }
 
-          return json({ success: true, items });
+          return json({ 
+            success: true, 
+            items,
+            pagination: paginationInfo
+          });
         } catch (err: any) {
           return json({ success: false, error: err?.message || "Failed to reach external API" }, { status: 502 });
         }

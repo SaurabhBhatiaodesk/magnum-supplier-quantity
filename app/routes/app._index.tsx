@@ -72,9 +72,10 @@ export default function Index() {
   const [csvData, setCsvData] = useState<any>(null);
   const [keyMappings, setKeyMappings] = useState<Record<string, string>>({});
   const [importType, setImportType] = useState<ImportType>('all');
-  const [importFilters, setImportFilters] = useState<{ selectedAttributes: string[]; selectedValues: string[] }>({
+  const [importFilters, setImportFilters] = useState<{ selectedAttributes: string[]; selectedValues: string[]; apiPagesToFetch?: number[] }>({
     selectedAttributes: [],
-    selectedValues: []
+    selectedValues: [],
+    apiPagesToFetch: []
   });
   const [markupConfig, setMarkupConfig] = useState<MarkupConfig>({
     conditions: [],
@@ -145,8 +146,6 @@ export default function Index() {
       return;
     }
     
-    console.log('🔍 Initializing state from localStorage...');
-    
     // Load all states
     const savedCurrentStep = loadState(PERSISTENCE_KEYS.CURRENT_STEP, 1);
     const savedDataSource = loadState(PERSISTENCE_KEYS.DATA_SOURCE, 'api');
@@ -173,7 +172,6 @@ export default function Index() {
     setSelectedSupplier(savedSelectedSupplier);
     setEditingApi(savedEditingApi);
 
-    console.log('✅ State restored from localStorage');
   }, [searchParams]);
 
   // Persist state changes
@@ -298,9 +296,6 @@ export default function Index() {
 
   // Debug useEffect to track csvData changes
   useEffect(() => {
-    console.log('🔍 csvData changed:', csvData);
-    console.log('🔍 Current step:', currentStep);
-    console.log('🔍 Data source:', dataSource);
   }, [csvData, currentStep, dataSource]);
 
   // Immediate data restoration for any step

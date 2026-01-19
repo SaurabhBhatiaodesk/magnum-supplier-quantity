@@ -16,7 +16,7 @@ interface ImportSummaryProps {
   apiCredentials: { apiUrl: string; accessToken: string };
   csvData: { fileName?: string } | null;
   keyMappings: Record<string, string>;
-  importFilters: { selectedAttributes: string[]; selectedValues: string[] };
+  importFilters: { selectedAttributes: string[]; selectedValues: string[]; apiPagesToFetch?: number[] };
   markupConfig: {
     conditions: Array<any>;
     conditionsType: 'all' | 'any';
@@ -124,12 +124,15 @@ export default function ImportProcessStep(props: ImportSummaryProps) {
 
   function buildProductsFromState() {
     // Build complete import configuration
+    console.log('📦 Building import config, importFilters:', props.importFilters);
+    console.log('📦 apiPagesToFetch:', props.importFilters?.apiPagesToFetch);
+    
     const importConfig = {
       dataSource: props.dataSource,
       importType: 'all', // Keep it simple
       importConfig: props.importConfig,
       keyMappings: props.keyMappings,
-      importFilters: props.importFilters, // Keep original filters
+      importFilters: props.importFilters, // Keep original filters (includes apiPagesToFetch)
       markupConfig: props.markupConfig,
       totalProducts: props.productCount,
       // Add actual data source

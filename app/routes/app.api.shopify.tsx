@@ -1005,6 +1005,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 
                 // Save to database
                 try {
+                  // Parse apiUpdatedAt from processedProduct
+                  const parseApiTimestamp = (updatedAt: any): Date | null => {
+                    if (!updatedAt) return null;
+                    if (updatedAt instanceof Date) return updatedAt;
+                    try {
+                      return new Date(updatedAt);
+                    } catch {
+                      return null;
+                    }
+                  };
+                  
+                  const apiUpdatedAt = processedProduct.apiUpdatedAt 
+                    ? parseApiTimestamp(processedProduct.apiUpdatedAt)
+                    : (processedProduct._originalApiData?.updated_at 
+                      ? parseApiTimestamp(processedProduct._originalApiData.updated_at)
+                      : null);
+                  
                   await prisma.importedProduct.create({
                     data: {
                       shop: session.shop,
@@ -1031,8 +1048,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                       variants: JSON.stringify(processedProduct.variants || []),
                       markupApplied: !!processedProduct.markupApplied,
                       markupType: processedProduct.markupType || '',
-                      markupValue: processedProduct.markupValue || ''
-                    }
+                      markupValue: processedProduct.markupValue || '',
+                      apiUpdatedAt: apiUpdatedAt
+                    } as any
                   });
                 } catch (dbError) {
                   console.error('Failed to save product to database:', dbError);
@@ -1075,6 +1093,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               
               // Save to database
               try {
+                // Parse apiUpdatedAt from processedProduct
+                const parseApiTimestamp = (updatedAt: any): Date | null => {
+                  if (!updatedAt) return null;
+                  if (updatedAt instanceof Date) return updatedAt;
+                  try {
+                    return new Date(updatedAt);
+                  } catch {
+                    return null;
+                  }
+                };
+                
+                const apiUpdatedAt = processedProduct.apiUpdatedAt 
+                  ? parseApiTimestamp(processedProduct.apiUpdatedAt)
+                  : (processedProduct._originalApiData?.updated_at 
+                    ? parseApiTimestamp(processedProduct._originalApiData.updated_at)
+                    : null);
+                
                 await prisma.importedProduct.create({
                   data: {
                     shop: session.shop,
@@ -1101,8 +1136,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                     variants: JSON.stringify(processedProduct.variants || []),
                     markupApplied: !!processedProduct.markupApplied,
                     markupType: processedProduct.markupType || '',
-                    markupValue: processedProduct.markupValue || ''
-                  }
+                    markupValue: processedProduct.markupValue || '',
+                    apiUpdatedAt: apiUpdatedAt
+                  } as any
                 });
               } catch (dbError) {
                 console.error('Failed to save product to database:', dbError);
@@ -1699,54 +1735,152 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
     
     const normalizedToken = apiCredentials.accessToken.replace(/^Bearer\s+/i, "");
     
-    const res = await fetch(apiCredentials.apiUrl, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${normalizedToken}`,
-        Accept: "application/json",
-        "User-Agent": "Shopify-Product-Import/1.0"
-      },
-      signal: AbortSignal.timeout(10000)
-    });
+    // OPTIMIZATION: Only fetch specific pages if apiPagesToFetch is provided
+    // This makes import much faster - if user selected from page 3 and 4, only fetch those 2 pages
+    console.log('🔍 Import filters received:', JSON.stringify(importFilters, null, 2));
+    console.log('🔍 apiPagesToFetch:', importFilters?.apiPagesToFetch);
     
-    console.log('API Response Status:', res.status);
-    console.log('API Response Headers:', Object.fromEntries(res.headers.entries()));
+    const pagesToFetch = importFilters?.apiPagesToFetch && Array.isArray(importFilters.apiPagesToFetch) && importFilters.apiPagesToFetch.length > 0
+      ? importFilters.apiPagesToFetch
+      : null; // If not specified, fetch all pages (fallback)
     
-    if (!res.ok) {
-      console.error('API fetch failed:', res.status, res.statusText);
-      return [];
-    }
+    let allItems: any[] = [];
     
-    const body = await res.json();
-    console.log('API Response Body:', JSON.stringify(body, null, 2));
-    
-    // Extract items from API response
-    let items: any[] = [];
-    if (Array.isArray(body)) {
-      items = body;
-      console.log('API returned array with', items.length, 'items');
-    } else if (body && typeof body === 'object') {
-      console.log('API returned object, searching for array...');
-      for (const key of Object.keys(body)) {
-        const val = (body as any)[key];
-        console.log('Checking key:', key, 'type:', typeof val, 'isArray:', Array.isArray(val));
-        if (Array.isArray(val) && val.length > 0) {
-          items = val;
-          console.log('Found array in key:', key, 'with', items.length, 'items');
+    if (pagesToFetch && pagesToFetch.length > 0) {
+      // OPTIMIZED: Only fetch specific pages
+      console.log(`⚡ OPTIMIZED MODE: Fetching only ${pagesToFetch.length} specific page(s):`, pagesToFetch);
+      
+      for (const pageNum of pagesToFetch) {
+        console.log(`📄 Fetching page ${pageNum}...`);
+        
+        // Build URL for specific page
+        const urlObj = new URL(apiCredentials.apiUrl);
+        urlObj.searchParams.set('page', pageNum.toString());
+        const pageUrl = urlObj.toString();
+        
+        const res: Response = await fetch(pageUrl, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${normalizedToken}`,
+            Accept: "application/json",
+            "User-Agent": "Shopify-Product-Import/1.0"
+          },
+          signal: AbortSignal.timeout(30000)
+        });
+        
+        console.log(`API Response Status (Page ${pageNum}):`, res.status);
+        
+        if (!res.ok) {
+          console.error(`API fetch failed for page ${pageNum}:`, res.status, res.statusText);
+          continue; // Skip this page, continue with others
+        }
+        
+        const body: any = await res.json();
+        
+        // Extract items from API response
+        let pageItems: any[] = [];
+        if (Array.isArray(body)) {
+          pageItems = body;
+        } else if (body && typeof body === 'object') {
+          if (Array.isArray(body.data)) {
+            pageItems = body.data;
+          } else if (Array.isArray(body.products)) {
+            pageItems = body.products;
+          } else {
+            for (const key of Object.keys(body)) {
+              const val = (body as any)[key];
+              if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object') {
+                pageItems = val;
+                break;
+              }
+            }
+          }
+        }
+        
+        if (pageItems.length > 0) {
+          allItems = allItems.concat(pageItems);
+          console.log(`Page ${pageNum}: Collected ${pageItems.length} items, Total so far: ${allItems.length}`);
+        }
+      }
+      
+      console.log(`✅ OPTIMIZED fetch complete - Fetched ${pagesToFetch.length} page(s), Total items: ${allItems.length}`);
+    } else {
+      // FALLBACK: Fetch all pages (if apiPagesToFetch not provided)
+      console.log('🔄 FALLBACK MODE: Fetching all pages (apiPagesToFetch not provided)');
+      let nextPageUrl: string | null = apiCredentials.apiUrl;
+      let pageCount = 0;
+      const maxPages = 1000; // Safety limit
+      
+      while (nextPageUrl && pageCount < maxPages) {
+        pageCount++;
+        console.log(`📄 Fetching page ${pageCount}: ${nextPageUrl}`);
+        
+        const res: Response = await fetch(nextPageUrl, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${normalizedToken}`,
+            Accept: "application/json",
+            "User-Agent": "Shopify-Product-Import/1.0"
+          },
+          signal: AbortSignal.timeout(30000)
+        });
+        
+        console.log(`API Response Status (Page ${pageCount}):`, res.status);
+        
+        if (!res.ok) {
+          console.error(`API fetch failed for page ${pageCount}:`, res.status, res.statusText);
+          break;
+        }
+        
+        const body: any = await res.json();
+        
+        // Extract items from API response
+        let pageItems: any[] = [];
+        if (Array.isArray(body)) {
+          pageItems = body;
+        } else if (body && typeof body === 'object') {
+          if (Array.isArray(body.data)) {
+            pageItems = body.data;
+          } else if (Array.isArray(body.products)) {
+            pageItems = body.products;
+          } else {
+            for (const key of Object.keys(body)) {
+              const val = (body as any)[key];
+              if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object') {
+                pageItems = val;
+                break;
+              }
+            }
+          }
+        }
+        
+        if (pageItems.length > 0) {
+          allItems = allItems.concat(pageItems);
+          console.log(`Page ${pageCount}: Collected ${pageItems.length} items, Total so far: ${allItems.length}`);
+        }
+        
+        // Get next page URL
+        nextPageUrl = body.next_page_url || null;
+        if (!nextPageUrl) {
+          console.log(`Page ${pageCount}: No next page URL, pagination complete`);
           break;
         }
       }
+      
+      console.log(`✅ Pagination complete - Fetched ${pageCount} page(s), Total items: ${allItems.length}`);
     }
+    
+    const items = allItems;
     
     console.log('Final items array length:', items.length);
     if (items.length > 0) {
       console.log('Sample item:', items[0]);
       console.log('Available fields in API item:', Object.keys(items[0]));
       
-      // Show all available product names for debugging
-      console.log('=== ALL AVAILABLE API PRODUCTS ===');
-      items.forEach((item: any, index: number) => {
-        console.log(`${index + 1}. "${item.name || 'No Name'}"`);
+      // Show first 10 product names for debugging
+      console.log('=== FIRST 10 AVAILABLE API PRODUCTS ===');
+      items.slice(0, 10).forEach((item: any, index: number) => {
+        console.log(`${index + 1}. "${item.name || item.title || 'No Name'}"`);
       });
       console.log('=== END AVAILABLE API PRODUCTS ===');
     }
@@ -1927,6 +2061,18 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
       
       console.log(`🔍 SKU mapping check: product.sku="${product.sku}", item.sku="${item.sku}", item.code="${item.code}", final="${skuValue}"`);
       
+      // Parse API's updated_at timestamp
+      const parseApiTimestamp = (updatedAt: string | null | undefined): Date | null => {
+        if (!updatedAt) return null;
+        try {
+          return new Date(updatedAt);
+        } catch {
+          return null;
+        }
+      };
+      
+      const apiUpdatedAt = parseApiTimestamp(item.updated_at || item.updatedAt);
+      
       const shopifyProduct: any = {
         title: product.title || item.name || item.title || 'Imported Product',
         descriptionHtml: product.bodyHtml || product.descriptionHtml || item.description || '',
@@ -1934,6 +2080,9 @@ async function fetchApiData(apiCredentials: any, importFilters: any, keyMappings
         productType: product.productType || item.type || '',
         tags: product.tags ? [product.tags] : [],
         status: 'DRAFT', // Will be set later
+        // Store original API data for reference
+        _originalApiData: item, // Store original item for apiUpdatedAt
+        apiUpdatedAt: apiUpdatedAt, // Store parsed timestamp
         variants: [{
           price: product.price || item.price || '0.00',
           compareAtPrice: product.compareAtPrice || item.compareAtPrice || '',

@@ -87,14 +87,22 @@ export default function ApiCredentialsStep({ credentials, onCredentialsChange, o
   }, []);
   
   // Build suppliers list from saved connections - deduplicate by supplier email
+  // Store supplier data separately to avoid passing custom props to DOM elements
+  const supplierDataMap = new Map<string, { supplierName: string; supplierEmail: string }>();
   const uniqueSuppliers = savedConnections.reduce((acc: any[], conn) => {
-    const existingIndex = acc.findIndex(s => s.supplierEmail === conn.supplierEmail);
+    const existingIndex = acc.findIndex(s => {
+      const data = supplierDataMap.get(s.value);
+      return data?.supplierEmail === conn.supplierEmail;
+    });
     if (existingIndex === -1) {
+      const supplierId = conn.id;
+      supplierDataMap.set(supplierId, {
+        supplierName: conn.supplierName || conn.name || '',
+        supplierEmail: conn.supplierEmail || ''
+      });
       acc.push({
         label: `${conn.supplierName || conn.name} (${conn.supplierEmail || 'No email'})`,
-        value: conn.id,
-        supplierName: conn.supplierName || conn.name,
-        supplierEmail: conn.supplierEmail
+        value: supplierId
       });
     }
     return acc;
@@ -127,10 +135,10 @@ export default function ApiCredentialsStep({ credentials, onCredentialsChange, o
         connectionId: undefined
       });
     } else {
-      const supplier = suppliers.find(s => s.value === value);
-      if (supplier && 'supplierName' in supplier) {
-        setSupplierName(supplier.supplierName || '');
-        setSupplierEmail(supplier.supplierEmail || '');
+      const supplierData = supplierDataMap.get(value);
+      if (supplierData) {
+        setSupplierName(supplierData.supplierName || '');
+        setSupplierEmail(supplierData.supplierEmail || '');
         // Set connectionId for existing supplier
         onCredentialsChange({
           ...credentials,

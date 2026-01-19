@@ -34,9 +34,10 @@ import {
   MenuHorizontalIcon,
   UploadIcon,
   ClockIcon,
-  PlayIcon
+  PlayIcon,
+  RefreshIcon
 } from '@shopify/polaris-icons';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from '@remix-run/react';
 
 interface ScheduleConfig {
@@ -153,23 +154,27 @@ const ConnectionManagement = () => {
   };
   
   // Get supplier data from navigation state, URL parameters, and localStorage
-  const supplierData = location.state?.supplierData;
-  const isEditMode = location.state?.editMode || false;
+  // Use useMemo to stabilize the reference and prevent infinite loops
+  const supplierData = useMemo(() => location.state?.supplierData, [location.state]);
+  const isEditMode = useMemo(() => location.state?.editMode || false, [location.state]);
   
   // Also check URL parameters as fallback
-  const urlParams = new URLSearchParams(location.search);
-  const urlSupplierName = urlParams.get('supplier');
-  const urlEditMode = urlParams.get('editMode') === 'true';
+  const urlParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const urlSupplierName = useMemo(() => urlParams.get('supplier'), [urlParams]);
+  const urlEditMode = useMemo(() => urlParams.get('editMode') === 'true', [urlParams]);
   
   // Check localStorage as another fallback
   const [supplierDataFromStorage, setSupplierDataFromStorage] = useState<any>(null);
   
-  // Debug logging
-  console.log('🔍 ConnectionManagement Debug:');
-  console.log('Location state:', location.state);
-  console.log('URL params:', { supplier: urlSupplierName, editMode: urlEditMode });
-  console.log('Supplier data:', supplierData);
-  console.log('Is edit mode:', isEditMode);
+  // Use ref to track if we've already logged to prevent infinite logging
+  const hasLoggedRef = useRef(false);
+  
+  // Debug logging - only once on mount or when data actually changes
+  useEffect(() => {
+    if (!hasLoggedRef.current) {
+      hasLoggedRef.current = true;
+    }
+  }, [location.state, urlSupplierName, urlEditMode, supplierData, isEditMode]);
   
   // Load from localStorage on component mount
   useEffect(() => {
@@ -177,7 +182,6 @@ const ConnectionManagement = () => {
     if (storedData) {
       try {
         const parsedData = JSON.parse(storedData);
-        console.log('📦 Loaded supplier data from localStorage:', parsedData);
         setSupplierDataFromStorage(parsedData);
         // Clear localStorage after loading
         localStorage.removeItem('editSupplierData');
@@ -190,10 +194,13 @@ const ConnectionManagement = () => {
   // If we have URL params but no state, we need to load the supplier data
   const [supplierDataFromUrl, setSupplierDataFromUrl] = useState<any>(null);
   
+  // Use ref to track if we've already loaded from URL to prevent infinite loops
+  const hasLoadedFromUrlRef = useRef(false);
+  
   useEffect(() => {
-    if (urlSupplierName && !supplierData) {
-      console.log('🔄 Loading supplier data from URL parameter:', urlSupplierName);
+    if (urlSupplierName && !supplierData && !hasLoadedFromUrlRef.current) {
       loadSupplierDataFromName(urlSupplierName);
+      hasLoadedFromUrlRef.current = true;
     }
   }, [urlSupplierName, supplierData]);
   
@@ -238,7 +245,6 @@ const ConnectionManagement = () => {
           }, {});
           
           const supplierData = groupedConnections[supplierName];
-          console.log('📊 Loaded supplier data from URL:', supplierData);
           setSupplierDataFromUrl(supplierData);
         }
       }
@@ -251,81 +257,90 @@ const ConnectionManagement = () => {
   const [connections, setConnections] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
+  // Function to parse schedule data from connection
+  const parseScheduleData = (c: any) => {
+    let scheduleEnabled = false;
+    let scheduleFrequency: any = 'daily';
+    let scheduleTime = '09:00';
+    
+    // Parse schedule data from scheduledTime field
+    if (c.scheduledTime) {
+      try {
+        // Try to parse as JSON first
+        const scheduleData = JSON.parse(c.scheduledTime);
+        if (scheduleData.enabled !== undefined) {
+          scheduleEnabled = scheduleData.enabled;
+          scheduleFrequency = scheduleData.frequency || 'daily';
+          scheduleTime = scheduleData.time || '09:00';
+        } else {
+          // If not JSON, treat as simple time string
+          scheduleEnabled = true;
+          scheduleTime = c.scheduledTime;
+        }
+      } catch (e) {
+        // If parsing fails, treat as simple time string
+        scheduleEnabled = true;
+        scheduleTime = c.scheduledTime;
+      }
+    }
+    
+    return {
+      ...c,
+      scheduleEnabled,
+      scheduleFrequency,
+      scheduleTime
+    };
+  };
+
+  // Function to fetch connections from API (extracted for reuse)
+  const fetchConnectionsFromAPI = async () => {
+    try {
+      setIsLoading(true);
+      const response = await fetch('/app/api/connections');
+      const data = await response.json();
+      
+      if (data.success) {
+        // Parse schedule data for each connection
+        const connectionsWithSchedule = data.connections.map(parseScheduleData);
+        
+        setConnections(connectionsWithSchedule || []);
+        return connectionsWithSchedule || [];
+      } else {
+        console.error('❌ Failed to fetch connections:', data.error);
+        return [];
+      }
+    } catch (error) {
+      console.error('❌ Error fetching connections:', error);
+      return [];
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Load actual connections for this supplier
+  // Use ref to track previous finalSupplierData to prevent infinite loops
+  const prevFinalSupplierDataRef = useRef<any>(null);
+  
   useEffect(() => {
     const finalSupplierData = supplierData || supplierDataFromUrl || supplierDataFromStorage;
+    
+    // Only update if finalSupplierData actually changed
+    const finalSupplierDataKey = finalSupplierData ? JSON.stringify({ name: finalSupplierData.name, connectionsCount: finalSupplierData.connections?.length }) : 'null';
+    const prevKey = prevFinalSupplierDataRef.current ? JSON.stringify({ name: prevFinalSupplierDataRef.current.name, connectionsCount: prevFinalSupplierDataRef.current.connections?.length }) : 'null';
+    
+    if (finalSupplierDataKey === prevKey && prevFinalSupplierDataRef.current !== null) {
+      return; // Skip if data hasn't actually changed
+    }
+    
     if (finalSupplierData?.name) {
-      console.log('🔄 Setting connections from supplier data:', finalSupplierData.connections);
-      setConnections(finalSupplierData.connections || []);
+      const connectionsWithSchedule = (finalSupplierData.connections || []).map(parseScheduleData);
+      setConnections(connectionsWithSchedule);
       setIsLoading(false);
+      prevFinalSupplierDataRef.current = finalSupplierData;
     } else {
       // If no supplier data, fetch from API
-      const fetchConnections = async () => {
-        try {
-          setIsLoading(true);
-          const response = await fetch('/app/api/connections');
-          const data = await response.json();
-          
-          if (data.success) {
-            console.log('📡 Fetched connections from API:', data.connections);
-            
-            // Parse schedule data for each connection
-            const connectionsWithSchedule = data.connections.map((c: any) => {
-              let scheduleEnabled = false;
-              let scheduleFrequency: any = 'daily';
-              let scheduleTime = '09:00';
-              
-              // Parse schedule data from scheduledTime field
-              if (c.scheduledTime) {
-                try {
-                  // Try to parse as JSON first
-                  const scheduleData = JSON.parse(c.scheduledTime);
-                  if (scheduleData.enabled !== undefined) {
-                    scheduleEnabled = scheduleData.enabled;
-                    scheduleFrequency = scheduleData.frequency || 'daily';
-                    scheduleTime = scheduleData.time || '09:00';
-                  } else {
-                    // If not JSON, treat as simple time string
-                    scheduleEnabled = true;
-                    scheduleTime = c.scheduledTime;
-                  }
-                } catch (e) {
-                  // If parsing fails, treat as simple time string
-                  scheduleEnabled = true;
-                  scheduleTime = c.scheduledTime;
-                }
-              }
-              
-              return {
-                ...c,
-                scheduleEnabled,
-                scheduleFrequency,
-                scheduleTime
-              };
-            });
-            
-            console.log('🔍 Connections with parsed schedule data:', connectionsWithSchedule.map((c: any) => ({
-              id: c.id,
-              name: c.name,
-              apiUrl: c.apiUrl,
-              scheduleEnabled: c.scheduleEnabled,
-              scheduleFrequency: c.scheduleFrequency,
-              scheduleTime: c.scheduleTime,
-              scheduledTime: c.scheduledTime
-            })));
-            
-            setConnections(connectionsWithSchedule || []);
-          } else {
-            console.error('❌ Failed to fetch connections:', data.error);
-          }
-        } catch (error) {
-          console.error('❌ Error fetching connections:', error);
-        } finally {
-          setIsLoading(false);
-        }
-      };
-      
-      fetchConnections();
+      fetchConnectionsFromAPI();
+      prevFinalSupplierDataRef.current = null; // Mark that we're fetching from API
     }
   }, [supplierData, supplierDataFromUrl, supplierDataFromStorage]);
 
@@ -347,7 +362,6 @@ const ConnectionManagement = () => {
   }, []);
 
   const handleCardClick = (connectionId: string) => {
-    console.log(`Opening connection ${connectionId}`);
     // Add your navigation logic here
   };
 
@@ -356,7 +370,6 @@ const ConnectionManagement = () => {
   };
 
   const handleEditSchedule = (connection: any) => {
-    console.log('Edit schedule clicked for connection:', connection);
     setSelectedConnection(connection);
     
     // Load existing schedule if available
@@ -417,7 +430,6 @@ const ConnectionManagement = () => {
   };
 
   const handleEditConnection = (connection: any) => {
-    console.log('Edit connection clicked for:', connection);
     setEditingConnection(connection);
     setEditFormData({
       name: connection.name || '',
@@ -440,7 +452,6 @@ const ConnectionManagement = () => {
     }
 
     try {
-      console.log('🗑️ Deleting connection:', connection.name);
       
       const response = await fetch('/app/api/connections', {
         method: 'DELETE',
@@ -455,7 +466,6 @@ const ConnectionManagement = () => {
       const data = await response.json();
       
       if (data.success) {
-        console.log('✅ Connection deleted successfully');
         // Remove from local state
         setConnections(prev => prev.filter(conn => conn.id !== connection.id));
         alert('✅ Connection deleted successfully!');
@@ -469,9 +479,68 @@ const ConnectionManagement = () => {
     }
   };
 
+  const handleResyncProducts = async (connection: any) => {
+    if (!confirm(`Are you sure you want to resync products for "${connection.name}"?\n\nThis will check and update only products that have changed since last sync.`)) {
+      return;
+    }
+
+    try {
+      setMenuOpen(prev => ({ ...prev, [`api${connection.id}`]: false }));
+
+      // Show loading state
+      const loadingMessage = document.createElement('div');
+      loadingMessage.textContent = '🔄 Resyncing products... This may take a few moments.';
+      loadingMessage.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #000; color: #fff; padding: 15px 20px; border-radius: 8px; z-index: 10000;';
+      document.body.appendChild(loadingMessage);
+
+      // Call resync API endpoint
+      const response = await fetch('/app/api/resync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          connectionId: connection.id
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        // Resync is now running in background - show initial success message
+        loadingMessage.textContent = `✅ Resync started! Processing ${data.stats?.total || 0} products in background...`;
+        loadingMessage.style.background = '#1a7f37';
+        
+        // Refresh connections data after a delay to update lastSync time
+        // (resync updates lastSync when it completes)
+        setTimeout(() => {
+          fetchConnectionsFromAPI();
+        }, 5000); // Wait 5 seconds for initial processing
+        
+        // Auto-hide after 5 seconds (resync continues in background)
+        setTimeout(() => {
+          if (document.body.contains(loadingMessage)) {
+            document.body.removeChild(loadingMessage);
+          }
+        }, 5000);
+      } else {
+        // Show error in loading element
+        loadingMessage.textContent = `❌ Resync failed: ${data.error || 'Unknown error'}`;
+        loadingMessage.style.background = '#d72c0d';
+        setTimeout(() => {
+          if (document.body.contains(loadingMessage)) {
+            document.body.removeChild(loadingMessage);
+          }
+        }, 5000);
+      }
+    } catch (error: any) {
+      console.error('❌ Error resyncing products:', error);
+      alert('❌ Error resyncing products. Please try again.');
+    }
+  };
+
   const handleSaveConnection = async () => {
     try {
-      console.log('Saving connection:', editingConnection.id, editFormData);
       
       const response = await fetch('/app/api/connections', {
         method: 'PUT',
@@ -487,7 +556,6 @@ const ConnectionManagement = () => {
       const data = await response.json();
       
       if (data.success) {
-        console.log('✅ Connection updated successfully');
         // Update local state
         setConnections(prev => prev.map(conn => 
           conn.id === editingConnection.id 
@@ -507,8 +575,6 @@ const ConnectionManagement = () => {
   };
 
   const handleSaveSchedule = async () => {
-    console.log('Saving schedule for connection:', selectedConnection);
-    console.log('Schedule config:', scheduleConfig);
     
     try {
       // Save schedule to database
@@ -518,7 +584,6 @@ const ConnectionManagement = () => {
         time: scheduleConfig.time
       };
       
-      console.log('📝 Sending schedule data to backend:', scheduleData);
       
       const response = await fetch('/app/api/connections', {
         method: 'PUT',
@@ -536,7 +601,6 @@ const ConnectionManagement = () => {
       const data = await response.json();
       
       if (data.success) {
-        console.log('✅ Schedule saved to database successfully');
         
         // Update connection state with schedule info
         if (selectedConnection) {
@@ -554,7 +618,6 @@ const ConnectionManagement = () => {
         
         // If it's a test schedule (5 minutes), start the test timer
         if (scheduleConfig.frequency === 'test' && scheduleConfig.enabled) {
-          console.log('🕐 Starting test schedule for 5 minutes...');
           startTestTimer();
           alert('Test schedule started! Cron job will run in 5 minutes.');
         } else if (scheduleConfig.enabled) {
@@ -582,7 +645,6 @@ const ConnectionManagement = () => {
 
   const handleManualSync = async () => {
     try {
-      console.log('🚀 Starting manual sync for all connections...');
       
       const response = await fetch('/app/api/cron', {
         method: 'POST'
@@ -591,7 +653,6 @@ const ConnectionManagement = () => {
       const data = await response.json();
       
       if (data.success) {
-        console.log('✅ Manual sync completed:', data.results);
         // TODO: Show success message to user
         alert('Manual sync completed successfully!');
       } else {
@@ -637,17 +698,25 @@ const ConnectionManagement = () => {
   const csvTotalProducts = csvConnections.reduce((sum, c) => sum + (c.productCount || 0), 0);
 
   // Get supplier info
-  const finalSupplierData = supplierData || supplierDataFromUrl || supplierDataFromStorage;
-  const supplierName = finalSupplierData?.name || 'Unknown Supplier';
-  const supplierEmail = finalSupplierData?.connections?.[0]?.apiUrl || finalSupplierData?.connections?.[0]?.csvFileName || 'No email available';
-  const totalProducts = finalSupplierData?.totalProducts || 0;
+  const finalSupplierData = useMemo(() => 
+    supplierData || supplierDataFromUrl || supplierDataFromStorage,
+    [supplierData, supplierDataFromUrl, supplierDataFromStorage]
+  );
+  const supplierName = useMemo(() => finalSupplierData?.name || 'Unknown Supplier', [finalSupplierData]);
+  const supplierEmail = useMemo(() => 
+    finalSupplierData?.connections?.[0]?.apiUrl || finalSupplierData?.connections?.[0]?.csvFileName || 'No email available',
+    [finalSupplierData]
+  );
+  const totalProducts = useMemo(() => finalSupplierData?.totalProducts || 0, [finalSupplierData]);
   
-  console.log('📊 Supplier Info:', {
-    name: supplierName,
-    email: supplierEmail,
-    totalProducts: totalProducts,
-    connections: finalSupplierData?.connections
-  });
+  // Log supplier info only when it actually changes
+  const prevSupplierInfoRef = useRef<string>('');
+  useEffect(() => {
+    const currentInfo = JSON.stringify({ name: supplierName, email: supplierEmail, totalProducts });
+    if (currentInfo !== prevSupplierInfoRef.current) {
+      prevSupplierInfoRef.current = currentInfo;
+    }
+  }, [supplierName, supplierEmail, totalProducts, finalSupplierData]);
 
   function getTimeAgo(dateInput?: string | null) {
     if (!dateInput) return '—';
@@ -932,6 +1001,11 @@ const ConnectionManagement = () => {
                                       prefix: <Icon source={LinkIcon} />,
                                       onAction: () => handleEditConnection(connection)
                                     },
+                                    { 
+                                      content: 'Resync Products', 
+                                      prefix: <Icon source={RefreshIcon} />,
+                                      onAction: () => handleResyncProducts(connection)
+                                    },
                                     // { 
                                     //   content: 'Edit Schedule', 
                                     //   prefix: <Icon source={CalendarIcon} />,
@@ -1040,6 +1114,11 @@ const ConnectionManagement = () => {
                             >
                               <ActionList
                                 items={[
+                                    { 
+                                      content: 'Resync Products', 
+                                      prefix: <Icon source={RefreshIcon} />,
+                                      onAction: () => handleResyncProducts(connection)
+                                    },
                                     { 
                                       content: 'Delete Connection', 
                                       destructive: true, 

@@ -85,6 +85,7 @@ model ImportedProduct {
   markupApplied   Boolean  @default(false)
   markupType      String?  // percentage, fixed
   markupValue     String?
+  apiUpdatedAt    DateTime? // Store API's updated_at timestamp for comparison
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }

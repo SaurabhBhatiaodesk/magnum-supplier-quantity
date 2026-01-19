@@ -163,15 +163,7 @@ export default function SupplierListingStep({
           return acc;
         }, []);
         
-        console.log(`Removed ${rawList.length - uniqueConnections.length} duplicate connections`);
-        console.log('🔍 SupplierListing: Connections with schedule data:', uniqueConnections.map(c => ({
-          id: c.id,
-          name: c.name,
-          scheduleEnabled: c.scheduleEnabled,
-          scheduleFrequency: c.scheduleFrequency,
-          scheduleTime: c.scheduleTime,
-          scheduledTime: c.scheduledTime
-        })));
+        // Removed duplicate connections
         setConnections(uniqueConnections);
         setTotalImportedProducts(data.totalImportedProducts || 0);
       } else {
@@ -329,7 +321,6 @@ export default function SupplierListingStep({
       
       const result = await response.json();
       if (result.success) {
-        console.log('✅ Duplicates cleaned up:', result.message);
         // Reload suppliers after cleanup
         loadConnections();
       }
